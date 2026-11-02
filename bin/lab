@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# BookShelf lab helper - run from anywhere:  ./bin/lab <command>
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_DIR="$ROOT/env"
+WORK="$ROOT/work"
+set -a; . "$ENV_DIR/.env"; set +a
+SONAR_URL=http://localhost:9000
+OWNER="$(id -u):$(id -g)"
+
+dc()  { (cd "$ENV_DIR" && docker compose "$@"); }
+die() { echo "ERROR: $*" >&2; exit 1; }
+need_token() { [[ -n "${SONAR_TOKEN:-}" ]] || die "export SONAR_TOKEN=<your analysis token> first (LAB02)"; }
+
+usage() {
+  cat <<EOF
+Usage: lab <command>
+
+  up                 check host settings, build and start SonarQube, PostgreSQL, Jenkins, Gitea
+  down               stop the environment (volumes are kept)
+  ps | logs <svc>    status / follow logs of a service (sonarqube, db, jenkins, gitea)
+  wait               wait until SonarQube reports status UP
+  gitea-init         create the Gitea user + repositories and clone them into ./work
+  scan-java [-Dk=v]  build, test and analyse work/bookshelf-java (extra args go to Maven)
+  checks-py          run tests, coverage and linters in work/bookshelf-py
+  scan-py [-Dk=v]    analyse work/bookshelf-py with SonarScanner CLI (extra args go to the scanner)
+                     (set APP_DIR=... to analyse another directory)
+  breakfix <N>       copy break-fix scenario N into work/bookshelf-py (LAB10)
+  destroy            remove containers AND volumes (full reset)
+EOF
+}
+
+check_host() {
+  local m; m=$(sysctl -n vm.max_map_count)
+  if (( m < 524288 )); then
+    echo "vm.max_map_count is $m - SonarQube's Elasticsearch needs at least 524288. Run:"
+    echo "  sudo sysctl -w vm.max_map_count=524288 fs.file-max=131072"
+    echo "  echo -e 'vm.max_map_count=524288\nfs.file-max=131072' | sudo tee /etc/sysctl.d/99-sonarqube.conf"
+    exit 1
+  fi
+}
+
+wait_up() {
+  echo -n "waiting for SonarQube"
+  for _ in $(seq 1 120); do
+    if curl -fs "$SONAR_URL/api/system/status" | grep -q '"status":"UP"'; then echo " - UP"; return 0; fi
+    echo -n "."; sleep 5
+  done
+  die "SonarQube did not start - ./bin/lab logs sonarqube"
+}
+
+gitea_init() {
+  local G=http://localhost:3000 auth="$GITEA_USER:$GITEA_PASSWORD"
+  dc exec -T -u git gitea gitea admin user create --username "$GITEA_USER" --password "$GITEA_PASSWORD" \
+     --email "$GITEA_USER@bookshelf.local" --admin --must-change-password=false 2>/dev/null || echo "user $GITEA_USER exists"
+  mkdir -p "$WORK"
+  for app in bookshelf-java bookshelf-py; do
+    curl -fs -u "$auth" -X POST "$G/api/v1/user/repos" -H 'Content-Type: application/json' \
+         -d "{\"name\":\"$app\",\"default_branch\":\"main\"}" >/dev/null || echo "repo $app exists"
+    if [[ ! -d "$WORK/$app/.git" ]]; then
+      cp -r "$ROOT/apps/$app" "$WORK/$app"
+      (cd "$WORK/$app" && git init -q -b main && git add -A \
+        && git -c user.name="BookShelf Dev" -c user.email=dev@bookshelf.local commit -qm "Initial import" \
+        && git remote add origin "http://$GITEA_USER:$GITEA_PASSWORD@localhost:3000/$GITEA_USER/$app.git" \
+        && git push -q -u origin main)
+    fi
+  done
+  echo "repositories: $G/$GITEA_USER   working copies: $WORK"
+}
+
+scan_java() {
+  need_token
+  local dir; dir="$(cd "${APP_DIR:-$WORK/bookshelf-java}" && pwd)"
+  docker run --rm --network sonarlab -v "$dir":/usr/src -v sonarlab-m2:/root/.m2 -w /usr/src \
+    maven:3.9-eclipse-temurin-21 sh -c \
+    "mvn -B verify sonar:sonar -Dsonar.host.url=http://sonarqube:9000 -Dsonar.token=$SONAR_TOKEN $*; rc=\$?; chown -R $OWNER /usr/src; exit \$rc"
+}
+
+checks_py() {
+  local dir; dir="$(cd "${APP_DIR:-$WORK/bookshelf-py}" && pwd)"
+  docker run --rm -v "$dir":/usr/src -w /usr/src python:3.12-slim sh -c \
+    "sh run-checks.sh; rc=\$?; chown -R $OWNER /usr/src; exit \$rc"
+}
+
+scan_py() {
+  need_token
+  local dir; dir="$(cd "${APP_DIR:-$WORK/bookshelf-py}" && pwd)"
+  docker run --rm --network sonarlab -e SONAR_HOST_URL=http://sonarqube:9000 -e SONAR_TOKEN \
+    -v "$dir":/usr/src sonarsource/sonar-scanner-cli "$@"
+}
+
+breakfix() {
+  local n="${1:?scenario number}" src; src=$(ls -d "$ROOT"/break-fix/0"$n"-* 2>/dev/null | head -n1)
+  [[ -d "$src" ]] || die "no scenario $n"
+  cp "$src/sonar-project.properties" "$WORK/bookshelf-py/sonar-project.properties"
+  echo "scenario: $(basename "$src") - read $src/TICKET.md"
+  cat "$src/TICKET.md"
+}
+
+case "${1:-help}" in
+  up)         check_host; dc up -d --build; wait_up
+              echo "SonarQube $SONAR_URL | Jenkins http://localhost:8081 | Gitea http://localhost:3000" ;;
+  down)       dc down ;;
+  ps)         dc ps ;;
+  logs)       dc logs -f --tail 100 "${2:-sonarqube}" ;;
+  wait)       wait_up ;;
+  gitea-init) gitea_init ;;
+  scan-java)  shift; scan_java "$@" ;;
+  checks-py)  shift; checks_py "$@" ;;
+  scan-py)    shift; scan_py "$@" ;;
+  breakfix)   breakfix "${2:-}" ;;
+  destroy)    dc down -v ;;
+  *)          usage ;;
+esac

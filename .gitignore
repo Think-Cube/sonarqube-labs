@@ -1,0 +1,7 @@
+work/
+**/target/
+**/reports/
+**/.scannerwork/
+**/.venv/
+**/__pycache__/
+quality-config/
