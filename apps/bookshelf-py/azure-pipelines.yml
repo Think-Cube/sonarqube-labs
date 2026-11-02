@@ -1,0 +1,29 @@
+# LAB07 (Azure DevOps track) - self-hosted agent on the lab VM (pool "Default")
+# Service connection "sonarqube-lab": Project settings > Service connections > New > SonarQube Server
+trigger:
+  branches:
+    include: [main]
+
+pool:
+  name: Default
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+
+  - script: |
+      docker run --rm -v "$(Build.SourcesDirectory)":/usr/src -w /usr/src python:3.12-slim \
+        sh -c "sh run-checks.sh; chown -R $(id -u):$(id -g) /usr/src"
+    displayName: Tests, coverage and linters
+
+  - task: SonarQubePrepare@8
+    inputs:
+      SonarQube: sonarqube-lab
+      scannerMode: cli
+      configMode: file              # reads sonar-project.properties
+
+  - task: SonarQubeAnalyze@8
+
+  - task: SonarQubePublish@8        # waits for the quality gate and shows it in the build summary
+    inputs:
+      pollingTimeoutSec: '300'

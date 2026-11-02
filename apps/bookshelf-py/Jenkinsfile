@@ -1,0 +1,37 @@
+pipeline {
+    agent any
+    options { timestamps() }
+    triggers { pollSCM('H/2 * * * *') }
+
+    stages {
+        stage('Tests & linters') {
+            steps {
+                sh '''
+                    python3 -m venv .venv
+                    . .venv/bin/activate
+                    sh run-checks.sh
+                '''
+            }
+        }
+
+        stage('SonarQube analysis') {
+            steps {
+                script {
+                    // 'SonarScanner' = tool name from Manage Jenkins > Tools
+                    def scannerHome = tool 'SonarScanner'
+                    withSonarQubeEnv('sonarqube') {
+                        sh "${scannerHome}/bin/sonar-scanner"
+                    }
+                }
+            }
+        }
+
+        stage('Quality gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+    }
+}

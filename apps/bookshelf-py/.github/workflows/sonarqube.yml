@@ -1,0 +1,31 @@
+# LAB07 (GitHub track) - runs on a self-hosted runner installed on the lab VM,
+# so it can reach the private SonarQube at http://localhost:9000.
+name: SonarQube analysis
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  sonarqube:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0              # full history: blame data + accurate new code
+
+      - name: Tests, coverage and linters
+        run: |
+          docker run --rm -v "$PWD":/usr/src -w /usr/src python:3.12-slim \
+            sh -c "sh run-checks.sh; chown -R $(id -u):$(id -g) /usr/src"
+
+      - name: SonarQube scan (fails the job if the quality gate fails)
+        uses: SonarSource/sonarqube-scan-action@v8
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300

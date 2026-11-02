@@ -1,0 +1,5 @@
+target/
+reports/
+.scannerwork/
+.venv/
+__pycache__/

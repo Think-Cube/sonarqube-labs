@@ -1,0 +1,31 @@
+pipeline {
+    agent any
+    options { timestamps() }
+    triggers { pollSCM('H/2 * * * *') }
+
+    stages {
+        stage('Build & test') {
+            steps {
+                sh 'mvn -B verify'
+            }
+        }
+
+        stage('SonarQube analysis') {
+            steps {
+                // 'sonarqube' = the server name configured in Manage Jenkins > System
+                withSonarQubeEnv('sonarqube') {
+                    sh 'mvn -B sonar:sonar'
+                }
+            }
+        }
+
+        stage('Quality gate') {
+            steps {
+                // needs the SonarQube webhook -> http://jenkins:8080/sonarqube-webhook/
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+    }
+}
